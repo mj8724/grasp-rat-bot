@@ -441,7 +441,15 @@ export class Bot {
       totalCoinValue: totalCoinValue,
       kills: this.killCount,
       deaths: this.deathCount,
-      killers: this.strategy ? Object.values(this.strategy.killers).filter(k => k.kills >= 2).map(k => `${k.name}(${k.kills}杀)`).join(', ') : '',
+      killers: this.strategy ? Object.values(this.strategy.killers)
+        .filter(k => k.kills >= 2)
+        .sort((a, b) => b.kills - a.kills)
+        .map(k => `${k.name}(${k.kills}杀)`)
+        .join(', ') : '',
+      allKillers: this.strategy ? Object.values(this.strategy.killers)
+        .sort((a, b) => b.kills - a.kills)
+        .slice(0, 20)
+        .map(k => `${k.name}: ${k.kills}杀`) : [],
       mode: this.resting ? 'rest' : (this.strategy ? this.strategy.mode : '-'),
       wsStatus: this.resting
         ? `休息中 - ${restRemaining}分钟后恢复`

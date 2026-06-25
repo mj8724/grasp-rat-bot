@@ -25,7 +25,7 @@ export class Strategy {
     this.fleeTargetId = null;
     // 蹲守记录 { userId: { count, lastTime, name } }
     this.campers = {};
-    // 杀手记录 { userId: { kills, name } }
+    // 杀手记录 { name: { kills, name, lastTime } }
     this.killers = {};
     // 已处理的消息ID（去重用）
     this.seenMessageIds = new Set();
@@ -69,32 +69,23 @@ export class Strategy {
   }
 
   /**
-   * 记录杀手击杀数
+   * 记录杀手击杀数（直接用名字作 key，不依赖 userNames 映射）
    */
   _recordKiller(name) {
-    // 通过名字查找 userId
-    let userId = null;
-    for (const [id, userName] of this.game.userNames.entries()) {
-      if (userName === name) {
-        userId = id;
-        break;
-      }
+    if (!this.killers[name]) {
+      this.killers[name] = { kills: 0, name, lastTime: 0 };
     }
-    if (!userId) return;
-
-    if (!this.killers[userId]) {
-      this.killers[userId] = { kills: 0, name };
-    }
-    this.killers[userId].kills++;
-    this.killers[userId].name = name;
-    this.log(`[杀手] ${name} 击杀 ${this.killers[userId].kills} 人`);
+    this.killers[name].kills++;
+    this.killers[name].lastTime = Date.now();
+    this.log(`[杀手] ${name} 击杀 ${this.killers[name].kills} 人`);
   }
 
   /**
-   * 检查玩家是否是危险杀手
+   * 检查玩家是否是危险杀手（通过名字匹配）
    */
   _isDangerKiller(userId) {
-    const killer = this.killers[userId];
+    const name = this.game.getDisplayName(userId);
+    const killer = this.killers[name];
     return killer && killer.kills >= 2;
   }
 

@@ -128,6 +128,7 @@ export class Dashboard {
     const kills = s.kills ?? 0;
     const deaths = s.deaths ?? 0;
     const killers = s.killers ?? '';
+    const allKillers = s.allKillers ?? [];
     const wsStatus = s.wsStatus || (online ? 'connecting' : 'offline');
     const restRemaining = s.restRemaining;
     const isResting = mode === 'rest';
@@ -226,6 +227,20 @@ ${online ? `
   </div>
   ${killers ? `<div class="card" style="grid-column:span 2"><div class="label">⚠️ 危险杀手 (300m)</div><div class="value" style="font-size:16px;color:#f87171">${killers}</div></div>` : ''}
 </div>
+${allKillers.length > 0 ? `
+<div style="max-width:900px;margin:12px auto;background:#1e293b;border-radius:10px;border:1px solid #334155;padding:16px">
+  <h3 style="color:#f87171;font-size:14px;margin-bottom:12px">📋 杀手记录 (持久化)</h3>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px">
+    ${allKillers.map(function(k) {
+      const parts = k.split(': ');
+      const name = parts[0];
+      const killCount = parseInt(parts[1]) || 0;
+      const color = killCount >= 5 ? '#ef4444' : killCount >= 2 ? '#f87171' : '#94a3b8';
+      return '<div style="background:#0f172a;padding:8px 12px;border-radius:6px;border:1px solid #334155"><span style="color:' + color + ';font-weight:600">' + name + '</span><span style="color:#64748b;font-size:12px;float:right">' + killCount + '杀</span></div>';
+    }).join('')}
+  </div>
+</div>
+` : ''}
 ` : `
 <div style="max-width:900px;margin:40px auto;text-align:center">
   <div style="font-size:48px;margin-bottom:16px">⏸️</div>
