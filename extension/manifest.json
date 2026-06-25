@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "囤囤鼠Bot自动登录",
+  "version": "1.0",
+  "description": "自动检测游戏登录并启动Bot",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://grasp-rat-game.h-e.top/*",
+    "http://localhost:38472/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://grasp-rat-game.h-e.top/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "囤囤鼠Bot"
+  }
+}

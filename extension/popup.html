@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 350px;
+      padding: 20px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+    h1 {
+      font-size: 18px;
+      color: #38bdf8;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+    .status {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 16px;
+      padding: 12px;
+      border-radius: 8px;
+      background: #1e293b;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .status.ok { color: #4ade80; background: #052e16; border: 1px solid #166534; }
+    .status.error { color: #f87171; background: #2a0a0a; border: 1px solid #7f1d1d; }
+    .status.loading { color: #facc15; background: #2a1f00; border: 1px solid #713f12; }
+    .status.info { color: #38bdf8; background: #0c1a2e; border: 1px solid #1e3a5f; }
+    button {
+      width: 100%;
+      padding: 12px 16px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #0f172a;
+      background: #38bdf8;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-bottom: 10px;
+    }
+    button:hover { background: #7dd3fc; transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button:disabled { background: #475569; color: #94a3b8; cursor: not-allowed; transform: none; }
+    button.secondary {
+      background: #334155;
+      color: #e2e8f0;
+    }
+    button.secondary:hover { background: #475569; }
+    .info {
+      margin-top: 16px;
+      font-size: 11px;
+      color: #64748b;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .step {
+      display: flex;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .step-num {
+      width: 20px;
+      height: 20px;
+      background: #334155;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-right: 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #38bdf8;
+    }
+  </style>
+</head>
+<body>
+  <h1>🐭 囤囤鼠 Bot</h1>
+  <div id="status" class="status info">自动检测中...<br>打开游戏页面并登录即可自动启动</div>
+  <button id="btnManual">手动发送Token</button>
+  <button id="btnCheck" class="secondary">检查登录状态</button>
+  <div class="info">
+    <div class="step"><span class="step-num">1</span> 打开游戏页面</div>
+    <div class="step"><span class="step-num">2</span> 点击 LinuxDO 登录</div>
+    <div class="step"><span class="step-num">3</span> Bot 自动启动!</div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

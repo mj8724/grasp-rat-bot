@@ -1,0 +1,13 @@
+{
+  "name": "zhualaoshu-bot",
+  "version": "1.0.0",
+  "description": "囤囤鼠历险记自动游戏工具",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
