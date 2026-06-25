@@ -1,18 +1,64 @@
 // index.js - 入口: 启动 Bot
 
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
 import { exec } from 'child_process';
+import { fileURLToPath } from 'url';
 import { Bot } from './bot.js';
+import { Dashboard } from './dashboard.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const GAME_URL = 'https://grasp-rat-game.h-e.top';
 const LOCAL_PORT = 38472;
+const DASHBOARD_PORT = 38473;
+const TOKEN_FILE = path.join(__dirname, '.token.json');
 
 let bot = null;
 let tokenServer = null;
+let dashboard = null;
+let savedUserId = null;
+let savedToken = null;
+let logBuffer = [];
 
 function log(msg) {
   const time = new Date().toLocaleTimeString();
-  console.log(`[${time}] ${msg}`);
+  const logEntry = `[${time}] ${msg}`;
+  console.log(logEntry);
+  logBuffer.push(logEntry);
+  if (logBuffer.length > 100) logBuffer.shift();
+  // 同步到 dashboard
+  if (dashboard) {
+    dashboard.update({
+      ...dashboard.state,
+      logs: logBuffer.slice(-30),
+    });
+  }
+}
+
+// 保存 Token 到文件
+function saveToken(userId, token) {
+  try {
+    fs.writeFileSync(TOKEN_FILE, JSON.stringify({ userId, token }));
+    log(`Token 已保存`);
+  } catch (err) {
+    log(`保存 Token 失败: ${err.message}`);
+  }
+}
+
+// 从文件加载 Token
+function loadToken() {
+  try {
+    if (fs.existsSync(TOKEN_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf-8'));
+      if (data.userId && data.token) {
+        return data;
+      }
+    }
+  } catch (err) {
+    log(`加载 Token 失败: ${err.message}`);
+  }
+  return null;
 }
 
 function openBrowser(url) {
@@ -27,24 +73,69 @@ function openBrowser(url) {
   });
 }
 
-function startBot(userId, token) {
-  log(`用户 ID: ${userId}`);
-  log('正在启动 Bot...');
-  bot = new Bot(userId, token);
-  bot.start();
-
-  process.on('SIGINT', () => {
-    log('\n正在退出...');
-    if (bot) bot.stop();
-    process.exit(0);
-  });
-  process.on('SIGTERM', () => {
-    if (bot) bot.stop();
-    process.exit(0);
+function updateDashboard() {
+  if (!dashboard) return;
+  dashboard.update({
+    online: !!bot,
+    savedUserId: savedUserId,
+    logs: logBuffer.slice(-30),
   });
 }
 
-function startTokenServer(onToken) {
+function startBot(userId, token) {
+  if (bot) {
+    log('停止旧 Bot...');
+    bot.stop();
+    bot = null;
+  }
+
+  log(`用户 ID: ${userId}`);
+  log('正在启动 Bot...');
+  savedUserId = userId;
+  savedToken = token;
+  saveToken(userId, token);
+  updateDashboard();
+
+  bot = new Bot(userId, token, dashboard);
+  bot.start();
+}
+
+function stopBot() {
+  if (bot) {
+    log('Bot 已停止');
+    bot.stop();
+    bot = null;
+    updateDashboard();
+  }
+}
+
+function startDashboard() {
+  dashboard = new Dashboard(DASHBOARD_PORT);
+
+  // 设置回调
+  dashboard.onOnline = () => {
+    if (bot) return { ok: false, message: 'Bot 已在运行' };
+    if (!savedUserId || !savedToken) return { ok: false, message: '未找到 Token，请先登录' };
+    startBot(savedUserId, savedToken);
+    return { ok: true, message: 'Bot 已上线' };
+  };
+
+  dashboard.onOffline = () => {
+    stopBot();
+    return { ok: true, message: 'Bot 已下线' };
+  };
+
+  dashboard.onLogin = (userId, token) => {
+    startBot(userId, token);
+    return { ok: true, message: 'Token 已保存，Bot 已启动' };
+  };
+
+  dashboard.logBuffer = logBuffer;
+  dashboard.start();
+  updateDashboard();
+}
+
+function startTokenServer() {
   tokenServer = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -56,6 +147,7 @@ function startTokenServer(onToken) {
       return;
     }
 
+    // 接收 Token (Chrome 扩展调用)
     if (req.method === 'POST' && req.url === '/token') {
       let body = '';
       req.on('data', chunk => body += chunk);
@@ -69,16 +161,17 @@ function startTokenServer(onToken) {
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
-          onToken(Number(data.userId), data.token);
+          startBot(Number(data.userId), data.token);
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'text/plain' });
           res.end('Invalid JSON');
         }
       });
-    } else {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Not Found');
+      return;
     }
+
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
   });
 
   tokenServer.listen(LOCAL_PORT, () => {
@@ -97,37 +190,46 @@ async function main() {
       console.log('用法: node index.js <user_id> <session_token>');
       process.exit(1);
     }
+    startDashboard();
     startBot(userId, token);
     return;
   }
 
-  // 方式2: 启动 HTTP 服务器（持续运行，可重复发送 Token）
+  // 方式2: 启动 HTTP 服务器
   console.log('');
   console.log('╔══════════════════════════════════════════╗');
   console.log('║   囤囤鼠历险记 - 自动游戏工具            ║');
   console.log('╚══════════════════════════════════════════╝');
   console.log('');
-  console.log('🤖 自动模式已就绪!');
+
+  // 尝试加载已保存的 Token
+  const saved = loadToken();
+  if (saved) {
+    savedUserId = saved.userId;
+    savedToken = saved.token;
+    console.log(`✅ 已加载 Token (用户ID: ${savedUserId})`);
+    console.log(`   点击控制面板「上线」按钮启动 Bot`);
+  } else {
+    console.log('📋 首次使用请在控制面板输入 Token');
+  }
+
   console.log('');
-  console.log('控制面板: http://localhost:38473');
-  console.log('等待登录中...');
+  console.log(`控制面板: http://localhost:${DASHBOARD_PORT}`);
   console.log('');
 
-  openBrowser(GAME_URL);
-
-  // 持续监听 Token（不关闭服务器）
-  startTokenServer((userId, token) => {
-    log(`收到 Token! 用户ID: ${userId}`);
-
-    if (bot) {
-      // 已有 bot 在运行，停止旧的启动新的
-      log('停止旧 Bot，使用新 Token 重新启动...');
-      bot.stop();
-      bot = null;
-    }
-
-    startBot(userId, token);
-  });
+  startDashboard();
+  startTokenServer();
 }
+
+// 优雅退出
+process.on('SIGINT', () => {
+  log('\n正在退出...');
+  if (bot) bot.stop();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  if (bot) bot.stop();
+  process.exit(0);
+});
 
 main();

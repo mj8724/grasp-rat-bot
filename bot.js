@@ -3,11 +3,10 @@
 import { GameState, CONSTANTS } from './game-state.js';
 import { WSClient } from './ws-client.js';
 import { Strategy } from './strategies.js';
-import { Dashboard } from './dashboard.js';
 import https from 'https';
 
 export class Bot {
-  constructor(userId, token) {
+  constructor(userId, token, dashboard) {
     this.userId = Number(userId);
     this.token = token;
     this.game = new GameState();
@@ -19,28 +18,37 @@ export class Bot {
     this.killCount = 0;
     this.deathCount = 0;
     this.seenMessageIds = new Set();
-    this.dashboard = new Dashboard(38473);
+    this.dashboard = dashboard;
     this.resting = false;
     this.restUntil = 0;
+    this.restReason = '';
+    this.restDurationMs = 0;
     this.restCheckTimer = null;
     this.leftGame = false;
   }
 
   log(msg) {
     const time = new Date().toLocaleTimeString();
-    console.log(`[${time}] ${msg}`);
+    const logEntry = `[${time}] ${msg}`;
+    console.log(logEntry);
+    // 同步到 dashboard 的 logBuffer
+    if (this.dashboard && this.dashboard.logBuffer) {
+      this.dashboard.logBuffer.push(logEntry);
+      if (this.dashboard.logBuffer.length > 100) this.dashboard.logBuffer.shift();
+    }
   }
 
   async start() {
     this.log(`Bot starting for user ${this.userId}...`);
 
     // 设置 Dashboard 回调
-    this.dashboard.onLeave = () => {
-      this.log('[手动] 用户点击离开');
-      this._startRest('手动离开', 5 * 60 * 1000);
-    };
-    this.dashboard.gameStateGetter = () => this._getGameState();
-    this.dashboard.start();
+    if (this.dashboard) {
+      this.dashboard.onLeave = () => {
+        this.log('[手动] 用户点击离开');
+        this._startRest('手动离开', 5 * 60 * 1000);
+      };
+      this.dashboard.gameStateGetter = () => this._getGameState();
+    }
 
     // 先通过 HTTP 检查体力，如果耗尽直接下线
     const staminaOk = await this._checkStaminaBeforeConnect();
@@ -76,6 +84,7 @@ export class Bot {
         dir_x: (b.dir_x_micros || 0) / 1000000,
         dir_y: (b.dir_y_micros || 0) / 1000000,
       })),
+      logs: this.dashboard ? this.dashboard.logBuffer.slice(-30) : [],
     };
   }
 
@@ -132,6 +141,10 @@ export class Bot {
     this.resting = false;
     this.leftGame = false;
 
+    // 保存旧的策略数据（休息恢复时保留记录）
+    const oldKillers = this.strategy?.killers || {};
+    const oldCampers = this.strategy?.campers || {};
+
     this.ws = new WSClient(
       this.userId,
       this.token,
@@ -143,6 +156,10 @@ export class Bot {
     );
 
     this.strategy = new Strategy(this.game, this.ws, (msg) => this.log(msg));
+    // 恢复之前的记录（休息后保留）
+    this.strategy.killers = oldKillers;
+    this.strategy.campers = oldCampers;
+
     // 被打了 → 下线（蹲守者休息更久）
     this.strategy.onHitLeave = (attackerName, restMs) => {
       const mins = Math.round(restMs / 60000);
@@ -164,9 +181,11 @@ export class Bot {
 
     if (this.statsTimer) clearInterval(this.statsTimer);
     this.statsTimer = setInterval(() => {
-      this._printStats();
-      this._updateDashboard();
-      this._checkStaminaLimit();
+      if (!this.resting) {
+        this._printStats();
+        this._updateDashboard();
+        this._checkStaminaLimit();
+      }
     }, 2000);
   }
 
@@ -176,7 +195,6 @@ export class Bot {
     if (this.statsTimer) clearInterval(this.statsTimer);
     if (this.restCheckTimer) clearTimeout(this.restCheckTimer);
     if (this.ws) this.ws.disconnect();
-    this.dashboard.stop();
   }
 
   _checkStaminaLimit() {
@@ -200,7 +218,10 @@ export class Bot {
     }
   }
 
-  async _startRest(reason, durationMs) {
+  _startRest(reason, durationMs) {
+    // 防止重复进入休息模式
+    if (this.resting) return;
+
     this.resting = true;
     this.restUntil = Date.now() + durationMs;
 
@@ -222,12 +243,14 @@ export class Bot {
     }
 
     // 更新控制面板
-    this.dashboard.update({
-      ...this.dashboard.state,
-      mode: 'rest',
-      wsStatus: `休息中 - ${resumeTime} 恢复`,
-      restRemaining: Math.round(durationMs / 60000),
-    });
+    if (this.dashboard) {
+      this.dashboard.update({
+        ...this.dashboard.state,
+        mode: 'rest',
+        wsStatus: `休息中 - ${resumeTime} 恢复`,
+        restRemaining: Math.round(durationMs / 60000),
+      });
+    }
 
     // 设置定时恢复 - 每5分钟检查一次体力是否恢复
     this._startRestCheck(durationMs);
@@ -242,12 +265,14 @@ export class Bot {
       const remaining = Math.max(0, Math.round((this.restUntil - Date.now()) / 60000));
 
       // 更新控制面板剩余时间
-      this.dashboard.update({
-        ...this.dashboard.state,
-        mode: 'rest',
-        wsStatus: `休息中 - ${remaining}分钟后恢复`,
-        restRemaining: remaining,
-      });
+      if (this.dashboard) {
+        this.dashboard.update({
+          ...this.dashboard.state,
+          mode: 'rest',
+          wsStatus: `休息中 - ${remaining}分钟后恢复`,
+          restRemaining: remaining,
+        });
+      }
 
       this.log(`[休息] 体力恢复中... 剩余 ${remaining} 分钟`);
 
@@ -333,6 +358,10 @@ export class Bot {
     if (msg.type === 'snapshot') {
       this.game.applySnapshot(msg);
       this._processMessages(msg.messages);
+      // 传递消息给策略模块记录杀手
+      if (this.strategy) {
+        this.strategy.processMessages(msg.messages);
+      }
     } else if (msg.type === 'pos') {
       this.game.applyPositionUpdate(msg);
     } else if (msg.type === 'shoot_failed') {
@@ -374,6 +403,7 @@ export class Bot {
   }
 
   _updateDashboard() {
+    if (!this.dashboard) return;
     const self = this.game.self;
     const stamina = self ? this.game.getStaminaInfo(self) : null;
 
@@ -411,11 +441,15 @@ export class Bot {
       totalCoinValue: totalCoinValue,
       kills: this.killCount,
       deaths: this.deathCount,
+      killers: this.strategy ? Object.values(this.strategy.killers).filter(k => k.kills >= 2).map(k => `${k.name}(${k.kills}杀)`).join(', ') : '',
       mode: this.resting ? 'rest' : (this.strategy ? this.strategy.mode : '-'),
       wsStatus: this.resting
         ? `休息中 - ${restRemaining}分钟后恢复`
         : (this.ws ? (this.ws.connected ? 'ws online' : 'ws offline') : 'no ws'),
       restRemaining: restRemaining,
+      logs: this.dashboard ? this.dashboard.logBuffer.slice(-30) : [],
+      online: true,
+      savedUserId: this.userId,
     });
   }
 

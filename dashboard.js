@@ -7,8 +7,13 @@ export class Dashboard {
     this.port = port;
     this.state = {};
     this.server = null;
+    // 回调函数
     this.onLeave = null;
+    this.onOnline = null;
+    this.onOffline = null;
+    this.onLogin = null;
     this.gameStateGetter = null;
+    this.logBuffer = [];
   }
 
   update(state) {
@@ -17,10 +22,19 @@ export class Dashboard {
 
   start() {
     this.server = http.createServer((req, res) => {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
       // API: 获取游戏状态
       if (req.url === '/api/state' && req.method === 'GET') {
         res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Access-Control-Allow-Origin', '*');
         const gameState = this.gameStateGetter ? this.gameStateGetter() : {};
         res.end(JSON.stringify(gameState));
         return;
@@ -35,6 +49,45 @@ export class Dashboard {
         } else {
           res.end(JSON.stringify({ ok: false, message: 'Bot未初始化' }));
         }
+        return;
+      }
+
+      // API: 上线
+      if (req.url === '/api/online' && req.method === 'POST') {
+        res.setHeader('Content-Type', 'application/json');
+        const result = this.onOnline ? this.onOnline() : { ok: false, message: '未初始化' };
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      // API: 下线
+      if (req.url === '/api/offline' && req.method === 'POST') {
+        res.setHeader('Content-Type', 'application/json');
+        const result = this.onOffline ? this.onOffline() : { ok: false, message: '未初始化' };
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      // API: 登录
+      if (req.url === '/api/login' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            if (!data.userId || !data.token) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, message: '缺少 userId 或 token' }));
+              return;
+            }
+            res.setHeader('Content-Type', 'application/json');
+            const result = this.onLogin ? this.onLogin(Number(data.userId), data.token) : { ok: false, message: '未初始化' };
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, message: '请求格式错误' }));
+          }
+        });
         return;
       }
 
@@ -53,6 +106,11 @@ export class Dashboard {
 
   _render() {
     const s = this.state;
+    const online = s.online ?? false;
+    const savedUserId = s.savedUserId ?? null;
+    const logs = s.logs ?? [];
+
+    // Bot 在线时显示游戏状态
     const mode = s.mode || '-';
     const modeEmoji = { collect: '💰', flee: '🏃', finish: '🎯', roam: '🚶', rest: '😴', fight_back: '⚔️', '-': '⏳' };
     const hp = s.hp ?? '-';
@@ -69,13 +127,18 @@ export class Dashboard {
     const totalCoinValue = s.totalCoinValue ?? 0;
     const kills = s.kills ?? 0;
     const deaths = s.deaths ?? 0;
-    const wsStatus = s.wsStatus || 'offline';
+    const killers = s.killers ?? '';
+    const wsStatus = s.wsStatus || (online ? 'connecting' : 'offline');
     const restRemaining = s.restRemaining;
     const isResting = mode === 'rest';
 
     let wsBadgeColor = '#f87171';
     if (wsStatus === 'ws online') wsBadgeColor = '#4ade80';
     else if (isResting) wsBadgeColor = '#facc15';
+    else if (!online) wsBadgeColor = '#475569';
+
+    let wsBadgeText = wsStatus;
+    if (!online) wsBadgeText = 'offline';
 
     const sta1hPercent = typeof sta1h === 'number' ? Math.round(sta1h / 3000 * 100) : 0;
     const sta1dPercent = typeof sta1d === 'number' ? Math.round(sta1d / 20000 * 100) : 0;
@@ -108,17 +171,17 @@ h1{text-align:center;color:#38bdf8;margin-bottom:20px;font-size:24px}
 .rest-alert h2{color:#facc15;font-size:20px;margin-bottom:8px}
 .rest-alert p{color:#fef08a;font-size:14px}
 .btn-row{max-width:900px;margin:16px auto;text-align:center}
-.btn-leave{background:#ef4444;color:white;border:none;padding:12px 32px;font-size:16px;font-weight:600;border-radius:8px;cursor:pointer;transition:background 0.2s}
-.btn-leave:hover{background:#dc2626}
-.btn-leave:disabled{background:#475569;cursor:not-allowed}
-#leaveMsg{color:#94a3b8;font-size:13px;margin-top:8px}
 .game-view{max-width:900px;margin:16px auto;background:#1e293b;border-radius:10px;border:1px solid #334155;padding:16px}
 .game-view h3{color:#38bdf8;font-size:14px;margin-bottom:12px}
 #gameCanvas{display:block;margin:0 auto;background:#060b16;border-radius:8px;border:1px solid #334155}
+.log-view{max-width:900px;margin:16px auto;background:#1e293b;border-radius:10px;border:1px solid #334155;padding:16px;max-height:300px;overflow-y:auto}
 .footer{text-align:center;margin-top:20px;color:#475569;font-size:12px}
 </style></head><body>
-<h1>🐭 囤囤鼠 Bot 控制台 <span class="ws-badge">${wsStatus}</span></h1>
+<h1>🐭 囤囤鼠 Bot 控制台 <span class="ws-badge">${wsBadgeText}</span></h1>
+
 ${isResting ? `<div class="rest-alert"><h2>😴 体力耗尽，休息中</h2><p>剩余时间: ${restRemaining ?? '?'} 分钟</p><p>恢复后将自动重新连接</p></div>` : ''}
+
+${online ? `
 <div class="grid">
   <div class="card mode-card">
     <div class="mode-emoji">${modeEmoji[mode] || '❓'}</div>
@@ -161,51 +224,148 @@ ${isResting ? `<div class="rest-alert"><h2>😴 体力耗尽，休息中</h2><p>
     <div class="label">附近</div>
     <div class="value">${players} 玩家</div>
   </div>
+  ${killers ? `<div class="card" style="grid-column:span 2"><div class="label">⚠️ 危险杀手 (300m)</div><div class="value" style="font-size:16px;color:#f87171">${killers}</div></div>` : ''}
 </div>
+` : `
+<div style="max-width:900px;margin:40px auto;text-align:center">
+  <div style="font-size:48px;margin-bottom:16px">⏸️</div>
+  <div style="font-size:18px;color:#94a3b8">Bot 离线</div>
+  ${savedUserId ? `<div style="font-size:14px;color:#64748b;margin-top:8px">用户 ID: ${savedUserId}</div>` : ''}
+</div>
+`}
+
 <div class="btn-row">
-  <button class="btn-leave" onclick="doLeave()">离开游戏</button>
-  <div id="leaveMsg"></div>
+  <button onclick="doOnline()" style="background:${online ? '#475569' : '#4ade80'};color:#0f172a;border:none;padding:12px 32px;font-size:16px;font-weight:600;border-radius:8px;cursor:pointer;margin-right:12px;${online ? 'opacity:0.5' : ''}">🟢 上线</button>
+  <button onclick="doOffline()" style="background:${online ? '#f87171' : '#475569'};color:white;border:none;padding:12px 32px;font-size:16px;font-weight:600;border-radius:8px;cursor:pointer;${online ? '' : 'opacity:0.5'}">🔴 下线</button>
+  <div id="actionMsg" style="margin-top:8px;font-size:13px;color:#94a3b8"></div>
 </div>
+
+${!savedUserId ? `
+<div style="max-width:900px;margin:16px auto;background:#1e293b;border-radius:10px;border:1px solid #334155;padding:20px">
+  <h3 style="color:#38bdf8;font-size:16px;margin-bottom:16px">🔑 首次登录</h3>
+  <p style="color:#94a3b8;font-size:13px;margin-bottom:12px">登录后 Token 会自动保存，之后只需点击「上线/下线」按钮</p>
+  <div style="display:flex;gap:12px;align-items:end;flex-wrap:wrap">
+    <div>
+      <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">用户 ID</label>
+      <input id="inputUserId" type="text" placeholder="输入用户ID" style="background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:8px 12px;border-radius:6px;width:150px;font-size:14px">
+    </div>
+    <div>
+      <label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">Session Token</label>
+      <input id="inputToken" type="text" placeholder="输入Token" style="background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:8px 12px;border-radius:6px;width:300px;font-size:14px">
+    </div>
+    <button onclick="doLogin()" style="background:#38bdf8;color:#0f172a;border:none;padding:8px 24px;font-size:14px;font-weight:600;border-radius:6px;cursor:pointer">保存并启动</button>
+    <a href="https://grasp-rat-game.h-e.top" target="_blank" style="color:#38bdf8;font-size:13px;text-decoration:none;padding:8px">打开游戏 →</a>
+  </div>
+  <div style="margin-top:12px;font-size:12px;color:#64748b">
+    <p>获取 Token 方法:</p>
+    <ol style="margin:8px 0 0 20px">
+      <li>打开游戏网站并登录</li>
+      <li>按 F12 打开开发者工具</li>
+      <li>在 Console 中输入: <code style="background:#334155;padding:2px 6px;border-radius:3px">localStorage.tmpGameUserId</code></li>
+      <li>再输入: <code style="background:#334155;padding:2px 6px;border-radius:3px">localStorage.tmpGameSessionToken</code></li>
+    </ol>
+  </div>
+</div>
+` : ''}
+
+${online ? `
 <div class="game-view">
   <h3>🗺️ 游戏视图 (半径 300m)</h3>
   <canvas id="gameCanvas" width="600" height="600"></canvas>
 </div>
+` : ''}
+
+<div class="log-view">
+  <h3 style="color:#38bdf8;font-size:14px;margin-bottom:12px">📋 运行日志</h3>
+  <div id="logContent" style="font-family:monospace;font-size:12px;color:#94a3b8;line-height:1.6">${logs.map(function(log) { return '<div>' + log + '</div>'; }).join('')}</div>
+</div>
+
 <div class="footer">每 2 秒自动刷新 · ${s.updatedAt || ''}</div>
 <script>
-async function doLeave() {
-  const btn = document.querySelector('.btn-leave');
-  const msg = document.getElementById('leaveMsg');
-  btn.disabled = true;
-  btn.textContent = '正在离开...';
+async function doOnline() {
+  const msg = document.getElementById('actionMsg');
+  msg.textContent = '正在上线...';
+  msg.style.color = '#facc15';
   try {
-    const resp = await fetch('/leave', { method: 'POST' });
+    const resp = await fetch('/api/online', { method: 'POST' });
     const data = await resp.json();
     msg.textContent = data.message;
     msg.style.color = data.ok ? '#4ade80' : '#f87171';
+    if (data.ok) setTimeout(function() { location.reload(); }, 1000);
   } catch(e) {
     msg.textContent = '请求失败: ' + e.message;
     msg.style.color = '#f87171';
   }
-  btn.disabled = false;
-  btn.textContent = '离开游戏';
 }
 
+async function doOffline() {
+  const msg = document.getElementById('actionMsg');
+  msg.textContent = '正在下线...';
+  msg.style.color = '#facc15';
+  try {
+    const resp = await fetch('/api/offline', { method: 'POST' });
+    const data = await resp.json();
+    msg.textContent = data.message;
+    msg.style.color = data.ok ? '#4ade80' : '#f87171';
+    if (data.ok) setTimeout(function() { location.reload(); }, 1000);
+  } catch(e) {
+    msg.textContent = '请求失败: ' + e.message;
+    msg.style.color = '#f87171';
+  }
+}
+
+async function doLogin() {
+  const userId = document.getElementById('inputUserId').value.trim();
+  const token = document.getElementById('inputToken').value.trim();
+  const msg = document.getElementById('actionMsg');
+
+  if (!userId || !token) {
+    msg.textContent = '请输入用户ID和Token';
+    msg.style.color = '#f87171';
+    return;
+  }
+
+  msg.textContent = '正在保存并启动...';
+  msg.style.color = '#facc15';
+
+  try {
+    const resp = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: Number(userId), token: token })
+    });
+    const data = await resp.json();
+    msg.textContent = data.message;
+    msg.style.color = data.ok ? '#4ade80' : '#f87171';
+    if (data.ok) setTimeout(function() { location.reload(); }, 1000);
+  } catch(e) {
+    msg.textContent = '请求失败: ' + e.message;
+    msg.style.color = '#f87171';
+  }
+}
+
+${online ? `
 // 游戏视图
-const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
-const W = canvas.width, H = canvas.height;
-const VIEW_RADIUS = 30000; // 300m
+var canvas = document.getElementById('gameCanvas');
+var ctx = canvas.getContext('2d');
+var W = canvas.width, H = canvas.height;
+var VIEW_RADIUS = 30000;
 
 async function fetchAndDraw() {
   try {
-    const resp = await fetch('/api/state');
-    const state = await resp.json();
+    var resp = await fetch('/api/state');
+    var state = await resp.json();
     draw(state);
+    if (state.logs) {
+      var logContent = document.getElementById('logContent');
+      logContent.innerHTML = state.logs.map(function(log) { return '<div>' + log + '</div>'; }).join('');
+      logContent.scrollTop = logContent.scrollHeight;
+    }
   } catch(e) {}
 }
 
 function worldToScreen(wx, wy, selfX, selfY) {
-  const scale = W / (VIEW_RADIUS * 2);
+  var scale = W / (VIEW_RADIUS * 2);
   return {
     x: W/2 + (wx - selfX) * scale,
     y: H/2 + (wy - selfY) * scale
@@ -225,76 +385,78 @@ function draw(state) {
     return;
   }
 
-  const selfX = state.self.x;
-  const selfY = state.self.y;
-  const scale = W / (VIEW_RADIUS * 2);
+  var selfX = state.self.x;
+  var selfY = state.self.y;
+  var scale = W / (VIEW_RADIUS * 2);
 
-  // 网格
   ctx.strokeStyle = 'rgba(148,163,184,0.1)';
   ctx.lineWidth = 1;
-  for (let i = -300; i <= 300; i += 50) {
-    const p = worldToScreen(selfX + i*100, selfY, selfX, selfY);
+  for (var i = -300; i <= 300; i += 50) {
+    var p = worldToScreen(selfX + i*100, selfY, selfX, selfY);
     ctx.beginPath(); ctx.moveTo(p.x, 0); ctx.lineTo(p.x, H); ctx.stroke();
-    const p2 = worldToScreen(selfX, selfY + i*100, selfX, selfY);
+    var p2 = worldToScreen(selfX, selfY + i*100, selfX, selfY);
     ctx.beginPath(); ctx.moveTo(0, p2.y); ctx.lineTo(W, p2.y); ctx.stroke();
   }
 
-  // 150m 危险圈
-  const dangerR = 15000 * scale;
+  var dangerR = 20000 * scale;
   ctx.strokeStyle = 'rgba(248,113,113,0.3)';
   ctx.lineWidth = 2;
   ctx.setLineDash([6,6]);
   ctx.beginPath(); ctx.arc(W/2, H/2, dangerR, 0, Math.PI*2); ctx.stroke();
   ctx.setLineDash([]);
 
-  // 金币
+  var killerR = 30000 * scale;
+  ctx.strokeStyle = 'rgba(239,68,68,0.4)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.arc(W/2, H/2, killerR, 0, Math.PI*2); ctx.stroke();
+  ctx.setLineDash([]);
+
   if (state.coins) {
-    for (const coin of state.coins) {
-      const p = worldToScreen(coin.x, coin.y, selfX, selfY);
-      if (p.x < -10 || p.x > W+10 || p.y < -10 || p.y > H+10) continue;
+    for (var ci = 0; ci < state.coins.length; ci++) {
+      var coin = state.coins[ci];
+      var cp = worldToScreen(coin.x, coin.y, selfX, selfY);
+      if (cp.x < -10 || cp.x > W+10 || cp.y < -10 || cp.y > H+10) continue;
       ctx.fillStyle = '#facc15';
-      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(cp.x, cp.y, 4, 0, Math.PI*2); ctx.fill();
     }
   }
 
-  // 玩家
   if (state.players) {
-    for (const player of state.players) {
-      const p = worldToScreen(player.x, player.y, selfX, selfY);
-      if (p.x < -20 || p.x > W+20 || p.y < -20 || p.y > H+20) continue;
+    for (var pi = 0; pi < state.players.length; pi++) {
+      var player = state.players[pi];
+      var pp = worldToScreen(player.x, player.y, selfX, selfY);
+      if (pp.x < -20 || pp.x > W+20 || pp.y < -20 || pp.y > H+20) continue;
       ctx.fillStyle = '#34d399';
-      ctx.beginPath(); ctx.arc(p.x, p.y, 6, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(pp.x, pp.y, 6, 0, Math.PI*2); ctx.fill();
       ctx.strokeStyle = '#020617'; ctx.lineWidth = 1.5; ctx.stroke();
-      // 名字
       ctx.fillStyle = '#a7f3d0';
       ctx.font = '10px monospace';
       ctx.textAlign = 'left';
-      ctx.fillText(player.name || '???', p.x + 10, p.y - 5);
-      ctx.fillText('HP ' + player.hp, p.x + 10, p.y + 7);
+      ctx.fillText(player.name || '???', pp.x + 10, pp.y - 5);
+      ctx.fillText('HP ' + player.hp, pp.x + 10, pp.y + 7);
     }
   }
 
-  // 自身
   ctx.fillStyle = '#38bdf8';
   ctx.beginPath(); ctx.arc(W/2, H/2, 8, 0, Math.PI*2); ctx.fill();
   ctx.strokeStyle = '#020617'; ctx.lineWidth = 2; ctx.stroke();
 
-  // 自身标签
   ctx.fillStyle = '#bae6fd';
   ctx.font = '11px monospace';
   ctx.textAlign = 'left';
   ctx.fillText('你 HP ' + state.self.hp, W/2 + 14, H/2 - 5);
   ctx.fillText('(' + Math.round(selfX/100) + 'm, ' + Math.round(selfY/100) + 'm)', W/2 + 14, H/2 + 7);
 
-  // 图例
   ctx.fillStyle = '#64748b';
   ctx.font = '10px sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillText('🔵 你  🟢 玩家  🟡 金币  🔴 150m危险圈', 10, H - 10);
+  ctx.fillText('🔵 你  🟢 玩家  🟡 金币  🔴 200m  🟠 300m杀手', 10, H - 10);
 }
 
 fetchAndDraw();
 setInterval(fetchAndDraw, 2000);
+` : ''}
 </script>
 </body></html>`;
   }

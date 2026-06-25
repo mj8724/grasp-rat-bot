@@ -64,6 +64,7 @@ export function selectBestTarget(self, targets, maxRange = CONSTANTS.BULLET_RANG
 /**
  * 计算射击预判位置
  * 考虑目标移动速度和子弹飞行时间
+ * 注意: 当前策略以逃跑为主，此函数暂未使用
  */
 export function calculateLeadPosition(self, target) {
   const selfX = Number(self.x);
