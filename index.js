@@ -7,6 +7,7 @@ import { exec } from 'child_process';
 import { fileURLToPath } from 'url';
 import { Bot } from './bot.js';
 import { Dashboard } from './dashboard.js';
+import { Persistence } from './persistence.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const GAME_URL = 'https://grasp-rat-game.h-e.top';
@@ -20,11 +21,13 @@ let dashboard = null;
 let savedUserId = null;
 let savedToken = null;
 let logBuffer = [];
+const store = new Persistence();
 
 function log(msg) {
   const time = new Date().toLocaleTimeString();
   const logEntry = `[${time}] ${msg}`;
   console.log(logEntry);
+  store.logMessage('index', msg);
   logBuffer.push(logEntry);
   if (logBuffer.length > 100) logBuffer.shift();
   // 同步到 dashboard
@@ -96,7 +99,8 @@ function startBot(userId, token) {
   saveToken(userId, token);
   updateDashboard();
 
-  bot = new Bot(userId, token, dashboard);
+  bot = new Bot(userId, token, dashboard, store);
+  updateDashboard();
   bot.start();
 }
 
@@ -105,6 +109,7 @@ function stopBot() {
     log('Bot 已停止');
     bot.stop();
     bot = null;
+    if (dashboard) dashboard.gameStateGetter = null;
     updateDashboard();
   }
 }
@@ -225,10 +230,12 @@ async function main() {
 process.on('SIGINT', () => {
   log('\n正在退出...');
   if (bot) bot.stop();
+  store.close();
   process.exit(0);
 });
 process.on('SIGTERM', () => {
   if (bot) bot.stop();
+  store.close();
   process.exit(0);
 });
 

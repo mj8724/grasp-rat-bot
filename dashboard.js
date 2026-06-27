@@ -36,7 +36,11 @@ export class Dashboard {
       if (req.url === '/api/state' && req.method === 'GET') {
         res.setHeader('Content-Type', 'application/json');
         const gameState = this.gameStateGetter ? this.gameStateGetter() : {};
-        res.end(JSON.stringify(gameState));
+        res.end(JSON.stringify({
+          ...this.state,
+          ...gameState,
+          logs: this.logBuffer.slice(-30),
+        }));
         return;
       }
 
@@ -112,7 +116,7 @@ export class Dashboard {
 
     // Bot 在线时显示游戏状态
     const mode = s.mode || '-';
-    const modeEmoji = { collect: '💰', flee: '🏃', finish: '🎯', roam: '🚶', rest: '😴', fight_back: '⚔️', '-': '⏳' };
+    const modeEmoji = { collect: '💰', flee: '🏃', survive: '🛡️', finish: '🎯', roam: '🚶', rest: '😴', fight_back: '⚔️', '-': '⏳' };
     const hp = s.hp ?? '-';
     const maxHp = s.maxHp ?? 100;
     const hpPercent = typeof hp === 'number' ? Math.round(hp / maxHp * 100) : 0;
@@ -295,8 +299,23 @@ ${online ? `
   <div id="logContent" style="font-family:monospace;font-size:12px;color:#94a3b8;line-height:1.6">${logs.map(function(log) { return '<div>' + log + '</div>'; }).join('')}</div>
 </div>
 
-<div class="footer">每 2 秒自动刷新 · ${s.updatedAt || ''}</div>
+<div class="footer">每 1 秒自动刷新 · ${s.updatedAt || ''}</div>
 <script>
+async function pollPageState() {
+  try {
+    var resp = await fetch('/api/state');
+    var state = await resp.json();
+    if (state.online && ${online ? 'false' : 'true'}) {
+      location.reload();
+      return;
+    }
+    if (!state.online && ${online ? 'true' : 'false'}) {
+      location.reload();
+    }
+  } catch(e) {}
+}
+setInterval(pollPageState, 1000);
+
 async function doOnline() {
   const msg = document.getElementById('actionMsg');
   msg.textContent = '正在上线...';
@@ -470,7 +489,7 @@ function draw(state) {
 }
 
 fetchAndDraw();
-setInterval(fetchAndDraw, 2000);
+setInterval(fetchAndDraw, 1000);
 ` : ''}
 </script>
 </body></html>`;

@@ -6,9 +6,10 @@ import { Strategy } from './strategies.js';
 import https from 'https';
 
 export class Bot {
-  constructor(userId, token, dashboard) {
+  constructor(userId, token, dashboard, store = null) {
     this.userId = Number(userId);
     this.token = token;
+    this.store = store;
     this.game = new GameState();
     this.game.userId = this.userId;
     this.ws = null;
@@ -25,12 +26,16 @@ export class Bot {
     this.restDurationMs = 0;
     this.restCheckTimer = null;
     this.leftGame = false;
+    this.lastDetailLogAt = 0;
   }
 
   log(msg) {
     const time = new Date().toLocaleTimeString();
     const logEntry = `[${time}] ${msg}`;
     console.log(logEntry);
+    if (this.store) {
+      this.store.logMessage('bot', msg, { userId: this.userId });
+    }
     // 同步到 dashboard 的 logBuffer
     if (this.dashboard && this.dashboard.logBuffer) {
       this.dashboard.logBuffer.push(logEntry);
@@ -64,19 +69,32 @@ export class Bot {
 
   _getGameState() {
     const self = this.game.self;
-    if (!self) return { self: null, players: [], coins: [], bullets: [] };
+    if (!self) {
+      return {
+        ...this.dashboard?.state,
+        self: null,
+        players: [],
+        coins: [],
+        bullets: [],
+        logs: this.dashboard ? this.dashboard.logBuffer.slice(-30) : [],
+      };
+    }
 
     const selfX = Number(self.x);
     const selfY = Number(self.y);
 
     return {
+      ...this.dashboard?.state,
       self: { x: selfX, y: selfY, hp: self.hp, max_hp: self.max_hp },
       players: this.game.otherPlayers
         .filter(p => p.life !== 'Dead' && p.hp > 0)
         .map(p => ({
           x: Number(p.x), y: Number(p.y),
           name: this.game.getDisplayName(p.user_id),
-          hp: p.hp, max_hp: p.max_hp,
+          hp: p.hp,
+          max_hp: p.max_hp,
+          killer: this.strategy ? !!this.strategy._isDangerKiller(p.user_id) : false,
+          distance_m: Math.round(Math.hypot(Number(p.x) - selfX, Number(p.y) - selfY) / 100),
         })),
       coins: this.game.coinDrops.map(c => ({ x: c.x, y: c.y, amount: c.amount || 1 })),
       bullets: this.game.bullets.slice(0, 50).map(b => ({
@@ -155,12 +173,12 @@ export class Bot {
       }
     );
 
-    this.strategy = new Strategy(this.game, this.ws, (msg) => this.log(msg));
+    this.strategy = new Strategy(this.game, this.ws, (msg) => this.log(msg), this.store);
     // 恢复之前的记录（休息后保留）
-    this.strategy.killers = oldKillers;
-    this.strategy.campers = oldCampers;
+    this.strategy.killers = { ...this.strategy.killers, ...oldKillers };
+    this.strategy.campers = { ...this.strategy.campers, ...oldCampers };
 
-    // 被打了 → 下线（蹲守者休息更久）
+    // 被同一人反复攻击 → 下线（蹲守者休息更久）
     this.strategy.onHitLeave = (attackerName, restMs) => {
       const mins = Math.round(restMs / 60000);
       this.log(`[被攻击] 被 ${attackerName} 攻击，休息 ${mins} 分钟...`);
@@ -186,7 +204,7 @@ export class Bot {
         this._updateDashboard();
         this._checkStaminaLimit();
       }
-    }, 2000);
+    }, 1000);
   }
 
   stop() {
@@ -226,8 +244,16 @@ export class Bot {
     this.restUntil = Date.now() + durationMs;
 
     const resumeTime = new Date(this.restUntil).toLocaleTimeString();
-    this.log(`[休息] ${reason} 体力耗尽，下线休息`);
+    this.log(`[休息] ${reason}，下线休息`);
     this.log(`[休息] 预计 ${resumeTime} 恢复 (${Math.round(durationMs / 60000)} 分钟后)`);
+    if (this.store) {
+      this.store.appendLog('rest_start', {
+        reason,
+        durationMs,
+        resumeAt: new Date(this.restUntil).toISOString(),
+        state: this._buildStateForLog(),
+      });
+    }
 
     // 停止游戏循环
     if (this.tickTimer) clearInterval(this.tickTimer);
@@ -389,6 +415,7 @@ export class Bot {
           if (victim === selfName) {
             this.deathCount++;
             this.log(`[死亡] ${text} (总计: ${this.deathCount})`);
+            this._handleSelfDeath(killer);
           } else if (killer === selfName) {
             this.killCount++;
             this.log(`[击杀] ${text} (总计: ${this.killCount})`);
@@ -461,6 +488,93 @@ export class Bot {
     });
   }
 
+  _handleSelfDeath(killerName) {
+    const self = this.game.self;
+    const nearbyPlayers = this._getNearbyPlayersForLog(12);
+    const killerPlayer = this._findPlayerByName(killerName);
+    let restMs = 10 * 60 * 1000;
+
+    if (killerPlayer && this.strategy) {
+      const userId = Number(killerPlayer.user_id);
+      this.strategy._recordCamper(userId, killerName, self);
+      restMs = this.strategy._getRestDuration(userId);
+    }
+
+    if (this.store) {
+      this.store.recordDeath({
+        killerName,
+        selfHp: self ? Number(self.hp || 0) : 0,
+        nearbyPlayers,
+        state: this._buildStateForLog(),
+      });
+    }
+
+    this._startRest(`被 ${killerName} 击杀`, restMs);
+  }
+
+  _findPlayerByName(name) {
+    return this.game.otherPlayers.find(p => this.game.getDisplayName(p.user_id) === name) || null;
+  }
+
+  _getNearbyPlayersForLog(limit = 10) {
+    const self = this.game.self;
+    if (!self) return [];
+    const selfX = Number(self.x);
+    const selfY = Number(self.y);
+    return this.game.otherPlayers
+      .map(p => ({
+        userId: Number(p.user_id),
+        name: this.game.getDisplayName(p.user_id),
+        hp: Number(p.hp || 0),
+        maxHp: Number(p.max_hp || 100),
+        x: Number(p.x),
+        y: Number(p.y),
+        distanceM: Math.round(Math.hypot(Number(p.x) - selfX, Number(p.y) - selfY) / 100),
+        killer: this.strategy ? !!this.strategy._isDangerKiller(p.user_id) : false,
+      }))
+      .sort((a, b) => a.distanceM - b.distanceM)
+      .slice(0, limit);
+  }
+
+  _buildStateForLog() {
+    const self = this.game.self;
+    const stamina = self ? this.game.getStaminaInfo(self) : null;
+    return {
+      tick: this.game.tick,
+      mode: this.resting ? 'rest' : (this.strategy ? this.strategy.mode : '-'),
+      self: self ? {
+        hp: Number(self.hp || 0),
+        maxHp: Number(self.max_hp || 100),
+        x: Number(self.x),
+        y: Number(self.y),
+        stamina5s: stamina?.s5s ?? null,
+        stamina1h: stamina?.s1h ?? null,
+        stamina1d: stamina?.s1d ?? null,
+      } : null,
+      nearbyPlayers: this._getNearbyPlayersForLog(10),
+      bullets: this.game.bullets.slice(0, 20).map(b => ({
+        x: b.start_x,
+        y: b.start_y,
+        dirX: (b.dir_x_micros || 0) / 1000000,
+        dirY: (b.dir_y_micros || 0) / 1000000,
+      })),
+      coins: this.game.coinDrops.length,
+      kills: this.killCount,
+      deaths: this.deathCount,
+    };
+  }
+
+  _recordDetailedState(reason) {
+    if (!this.store) return;
+    const now = Date.now();
+    if (now - this.lastDetailLogAt < 2000) return;
+    this.lastDetailLogAt = now;
+    this.store.appendLog('state_detail', {
+      reason,
+      state: this._buildStateForLog(),
+    });
+  }
+
   _printStats() {
     if (this.resting) {
       const remain = Math.max(0, Math.round((this.restUntil - Date.now()) / 60000));
@@ -490,5 +604,6 @@ export class Bot {
       `位置: ${x}m,${y}m | 附近玩家: ${players} | 金币: ${coins} | ` +
       `模式: ${mode} | 击杀: ${this.killCount} | 死亡: ${this.deathCount}`
     );
+    this._recordDetailedState('stats');
   }
 }

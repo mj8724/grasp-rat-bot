@@ -5,14 +5,18 @@ import { calculateMoveDirection } from './targeting.js';
 
 const DANGER_RADIUS = 20000; // 200m - 普通玩家危险距离
 const KILLER_DANGER_RADIUS = 30000; // 300m - 杀手危险距离
+const LOW_HP_THRESHOLD = 50;
+const SAFE_KILLER_DISTANCE = 50000; // 500m - 低血时与杀手保持的距离
 const CHASE_TIMEOUT_TICKS = 600; // 30秒
 const COIN_CLUSTER_RADIUS = 15000; // 150m - 金币聚集判定范围
+const TELEPORT_COOLDOWN_MS = 5000;
 
 export class Strategy {
-  constructor(gameState, wsClient, log) {
+  constructor(gameState, wsClient, log, store = null) {
     this.game = gameState;
     this.ws = wsClient;
     this.log = log;
+    this.store = store;
     this.currentVel = { dx: 1, dy: 1 };
     this.lastVelSent = { dx: 0, dy: 0 };
     this.mode = 'collect';
@@ -20,13 +24,16 @@ export class Strategy {
     this.initialized = false;
     this.tickCount = 0;
     this.lastTeleportAt = 0;
+    this.survivalStartedAt = 0;
+    this.survivalThreatId = null;
+    this.lastSurvivalLogAt = 0;
     // 逃跑追踪
     this.fleeingSince = 0;
     this.fleeTargetId = null;
     // 蹲守记录 { userId: { count, lastTime, name } }
-    this.campers = {};
+    this.campers = this.store ? this.store.loadCampers() : {};
     // 杀手记录 { name: { kills, name, lastTime } }
-    this.killers = {};
+    this.killers = this.store ? this.store.loadKillers() : {};
     // 已处理的消息ID（去重用）
     this.seenMessageIds = new Set();
     // 下线回调
@@ -55,7 +62,7 @@ export class Strategy {
 
           // 记录杀手（排除自己）
           if (killer !== selfName) {
-            this._recordKiller(killer);
+            this._recordKiller(killer, victim);
           }
         }
       }
@@ -71,7 +78,14 @@ export class Strategy {
   /**
    * 记录杀手击杀数（直接用名字作 key，不依赖 userNames 映射）
    */
-  _recordKiller(name) {
+  _recordKiller(name, victim = '') {
+    if (!name) return null;
+    if (this.store) {
+      this.killers[name] = this.store.recordKiller(name, victim) || this.killers[name];
+      this.log(`[杀手] ${name} 击杀 ${this.killers[name].kills} 人`);
+      return this.killers[name];
+    }
+
     if (!this.killers[name]) {
       this.killers[name] = { kills: 0, name, lastTime: 0 };
     }
@@ -123,17 +137,32 @@ export class Strategy {
 
       // 记录蹲守者
       if (attackerId) {
-        this._recordCamper(attackerId, attackerName);
-      }
-
-      // 通知 bot 下线（蹲守次数决定休息时长）
-      if (this.onHitLeave) {
+      const camper = this._recordCamper(attackerId, attackerName, self);
+      if (camper && camper.count > 1 && this.onHitLeave) {
         const restMs = this._getRestDuration(attackerId);
         this.onHitLeave(attackerName, restMs);
+        return;
+      }
+    }
+
+      this._startSurvival(attackerId);
+      if (hp < LOW_HP_THRESHOLD) {
+        this._executeSurvival(self, hp, stamina);
       }
       return;
     }
     this.lastHp = hp;
+
+    if (this.mode === 'survive' || hp < LOW_HP_THRESHOLD) {
+      if (this._canResumeCollect(self, hp)) {
+        this.log('[保命] HP 已恢复且杀手距离安全，恢复采集');
+        this.survivalStartedAt = 0;
+        this.survivalThreatId = null;
+      } else {
+        this._executeSurvival(self, hp, stamina);
+        return;
+      }
+    }
 
     // 检测 300m 内危险杀手 → 逃跑
     const killerThreat = this._findKillerThreat(self);
@@ -142,7 +171,7 @@ export class Strategy {
       this._executeFleeFrom(self, killerThreat);
       const dist = Math.round(Math.hypot(Number(killerThreat.x) - Number(self.x), Number(killerThreat.y) - Number(self.y)) / 100);
       const name = this.game.getDisplayName(killerThreat.user_id);
-      const kills = this.killers[Number(killerThreat.user_id)]?.kills || 0;
+      const kills = this.killers[name]?.kills || 0;
       this.log(`[逃跑] 杀手 ${name}(${kills}杀) 靠近 ${dist}m`);
       return;
     }
@@ -193,7 +222,14 @@ export class Strategy {
   /**
    * 记录蹲守者
    */
-  _recordCamper(userId, name) {
+  _recordCamper(userId, name, self = null) {
+    if (this.store) {
+      const record = this.store.recordCamper(userId, name, this._buildThreatContext(self));
+      this.campers[userId] = record;
+      this.log(`[蹲守] ${name} 已攻击 ${record.count} 次，下次休息 ${Math.round(record.restMs / 60000)} 分钟`);
+      return record;
+    }
+
     if (!this.campers[userId]) {
       this.campers[userId] = { count: 0, name, lastTime: 0 };
     }
@@ -201,18 +237,67 @@ export class Strategy {
     this.campers[userId].lastTime = Date.now();
     this.campers[userId].name = name;
     this.log(`[蹲守] ${name} 已攻击 ${this.campers[userId].count} 次`);
+    return this.campers[userId];
   }
 
   /**
    * 根据蹲守次数决定休息时长
-   * 第1次: 5分钟, 第2次: 10分钟, 第3次+: 20分钟
+   * 第1次: 10分钟, 第2次: 20分钟, 第3次: 40分钟, 第4次+: 60分钟
    */
   _getRestDuration(userId) {
-    if (!userId || !this.campers[userId]) return 5 * 60 * 1000;
-    const count = this.campers[userId].count;
-    if (count >= 3) return 20 * 60 * 1000;
-    if (count >= 2) return 10 * 60 * 1000;
-    return 5 * 60 * 1000;
+    if (!userId || !this.campers[userId]) return 10 * 60 * 1000;
+    const record = this.campers[userId];
+    if (record.restMs) return record.restMs;
+    const count = record.count;
+    if (count >= 4) return 60 * 60 * 1000;
+    if (count >= 3) return 40 * 60 * 1000;
+    if (count >= 2) return 20 * 60 * 1000;
+    return 10 * 60 * 1000;
+  }
+
+  _startSurvival(threatId = null) {
+    if (!this.survivalStartedAt) this.survivalStartedAt = Date.now();
+    this.survivalThreatId = threatId || this.survivalThreatId;
+    this._setMode('survive');
+  }
+
+  _canResumeCollect(self, hp) {
+    const maxHp = Number(self.max_hp || 100);
+    if (hp < maxHp) return false;
+    const killer = this._findNearestKiller(self, SAFE_KILLER_DISTANCE);
+    return !killer;
+  }
+
+  _executeSurvival(self, hp, stamina) {
+    this._startSurvival();
+    const threat = this._findNearestThreat(self);
+    const now = Date.now();
+
+    if (!threat) {
+      this._sendVel(0, 0, true);
+      if (now - this.lastSurvivalLogAt > 2000) {
+        this.log(`[保命] HP ${hp}/${self.max_hp || 100}，附近暂无威胁，暂停采集等待回血`);
+        this.lastSurvivalLogAt = now;
+      }
+      return;
+    }
+
+    const dist = Math.hypot(Number(threat.x) - Number(self.x), Number(threat.y) - Number(self.y));
+    const name = this.game.getDisplayName(threat.user_id);
+    if (stamina.canTeleport && now - this.lastTeleportAt > TELEPORT_COOLDOWN_MS) {
+      const safePoint = this._calculateSafeTeleportPoint(self, threat);
+      this.ws.teleport(safePoint.x, safePoint.y);
+      this.lastTeleportAt = now;
+      this.log(`[保命] HP ${hp}，传送远离 ${name} -> ${Math.round(safePoint.x / 100)}m,${Math.round(safePoint.y / 100)}m`);
+      return;
+    }
+
+    this._executeFleeFrom(self, threat);
+    if (now - this.lastSurvivalLogAt > 2000) {
+      const threatType = this._isDangerKiller(threat.user_id) ? '杀手' : '玩家';
+      this.log(`[保命] HP ${hp}，无法传送，远离${threatType} ${name} (${Math.round(dist / 100)}m)`);
+      this.lastSurvivalLogAt = now;
+    }
   }
 
   /**
@@ -241,9 +326,14 @@ export class Strategy {
    * 查找 300m 内的危险杀手
    */
   _findKillerThreat(self) {
+    return this._findNearestKiller(self, KILLER_DANGER_RADIUS);
+  }
+
+  _findNearestKiller(self, maxDistance = Infinity) {
     const selfX = Number(self.x);
     const selfY = Number(self.y);
-
+    let nearest = null;
+    let nearestDist = Infinity;
     for (const p of this.game.otherPlayers) {
       if (p.life === 'Dead' || p.hp <= 0) continue;
       const invUntil = Number(p.invulnerable_until_tick || 0);
@@ -253,9 +343,34 @@ export class Strategy {
       if (!this._isDangerKiller(userId)) continue;
 
       const dist = Math.hypot(Number(p.x) - selfX, Number(p.y) - selfY);
-      if (dist <= KILLER_DANGER_RADIUS) return p;
+      if (dist <= maxDistance && dist < nearestDist) {
+        nearest = p;
+        nearestDist = dist;
+      }
     }
-    return null;
+    return nearest;
+  }
+
+  _findNearestThreat(self) {
+    const killer = this._findNearestKiller(self);
+    if (killer) return killer;
+
+    const selfX = Number(self.x);
+    const selfY = Number(self.y);
+    let nearest = null;
+    let nearestDist = Infinity;
+
+    for (const p of this.game.otherPlayers) {
+      if (p.life === 'Dead' || p.hp <= 0) continue;
+      const invUntil = Number(p.invulnerable_until_tick || 0);
+      if (invUntil > 0) continue;
+      const dist = Math.hypot(Number(p.x) - selfX, Number(p.y) - selfY);
+      if (dist < nearestDist) {
+        nearest = p;
+        nearestDist = dist;
+      }
+    }
+    return nearest;
   }
 
   /**
@@ -281,6 +396,43 @@ export class Strategy {
   _executeFleeFrom(self, enemy) {
     const dir = calculateFleeDirection(self, Number(enemy.x), Number(enemy.y));
     this._sendVel(dir.dx || 1, dir.dy || 1);
+  }
+
+  _calculateSafeTeleportPoint(self, threat) {
+    const selfX = Number(self.x);
+    const selfY = Number(self.y);
+    let dx = selfX - Number(threat.x);
+    let dy = selfY - Number(threat.y);
+    const length = Math.hypot(dx, dy) || 1;
+    dx /= length;
+    dy /= length;
+
+    const targetX = Number(threat.x) + dx * SAFE_KILLER_DISTANCE;
+    const targetY = Number(threat.y) + dy * SAFE_KILLER_DISTANCE;
+    const radius = CONSTANTS.WORLD_RADIUS_CM || 1000000;
+    return {
+      x: Math.max(-radius, Math.min(radius, targetX)),
+      y: Math.max(-radius, Math.min(radius, targetY)),
+    };
+  }
+
+  _buildThreatContext(self) {
+    if (!self) return {};
+    const selfX = Number(self.x);
+    const selfY = Number(self.y);
+    return {
+      self: { x: selfX, y: selfY, hp: Number(self.hp || 0) },
+      nearbyPlayers: this.game.otherPlayers
+        .map(p => ({
+          userId: Number(p.user_id),
+          name: this.game.getDisplayName(p.user_id),
+          hp: Number(p.hp || 0),
+          distM: Math.round(Math.hypot(Number(p.x) - selfX, Number(p.y) - selfY) / 100),
+          killer: this._isDangerKiller(p.user_id),
+        }))
+        .sort((a, b) => a.distM - b.distM)
+        .slice(0, 10),
+    };
   }
 
   _executeCollect(self) {
@@ -377,7 +529,10 @@ export class Strategy {
   }
 
   _executeRoam(self) {
-    if (this.currentVel.dx === 0 && this.currentVel.dy === 0) {
+    // 每 5 秒（100 tick）随机改变方向，避免一直朝同一方向卡住
+    const shouldChangeDirection = this.currentVel.dx === 0 && this.currentVel.dy === 0 || this.tickCount % 100 === 0;
+
+    if (shouldChangeDirection) {
       const dx = Math.random() > 0.5 ? 1 : -1;
       const dy = Math.random() > 0.5 ? 1 : -1;
       this._sendVel(dx, dy, true);
